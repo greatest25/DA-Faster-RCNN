@@ -31,6 +31,14 @@ from detectron2.engine import default_writers
 
 from detectron2.data.datasets import register_coco_instances, register_pascal_voc
 
+sys.path.append("/mnt/lyh/DA-FasterCNN/DA-Faster-RCNN")
+from da2od.config import add_da2od_config
+from da2od.model import build_da2od  # Build DA2OD model
+from da2od.aligner_pred_guided import AlignMixin
+from da2od.pseudolabeler import PseudoLabeler
+from da2od.trainer import DA2ODTrainer
+
+
 # #FOR PASCAL VOC ANNOTATIONS
 # register_pascal_voc("city_trainS", "drive/My Drive/cityscape/", "train_s", 2007, ['car','person','rider','truck','bus','train','motorcycle','bicycle'])
 # register_pascal_voc("city_trainT", "drive/My Drive/cityscape/", "train_t", 2007, ['car','person','rider','truck','bus','train','motorcycle','bicycle'])
@@ -43,12 +51,49 @@ from detectron2.data.datasets import register_coco_instances, register_pascal_vo
 
 # register_coco_instances("dataset_test_real", {}, "drive/My Drive/Bellomo_Dataset_UDA/real_hololens/test/test_set.json", "./drive/My Drive/Bellomo_Dataset_UDA/real_hololens/test")
 
-from register_cityscapes import register_city_datasets
+from register_cityscapes import register_city_datasets, register_city_pseudo_dataset
+
+# 添加命令行参数支持
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--config-file", default="", help="DA2OD config file")
+parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
+args = parser.parse_args()
+
 
 data_format = register_city_datasets()      
 
 logger = logging.getLogger("detectron2")
 
+# === 伪标签加载逻辑 ===
+pseudo_root = Path(__file__).resolve().parent / "pseudo_labels"
+os.makedirs(pseudo_root, exist_ok=True)  # 确保目录存在
+
+pseudo_candidates = [
+    (pseudo_root / "city_trainT_full_pseudo_thr07_coco.json", "city_trainT_pseudo_thr07"),
+    (pseudo_root / "city_trainT_full_pseudo_coco.json", "city_trainT_pseudo_full"),
+    (pseudo_root / "city_trainT_pseudo_coco.json", "city_trainT_pseudo"),
+]
+
+target_train_dataset = ("city_trainT",)  # 默认使用无标签目标域
+for pseudo_path, dataset_name in pseudo_candidates:
+    if pseudo_path.is_file():
+        logger.info(f"✓ Found pseudo label file: {pseudo_path}")
+        target_image_root = "/mnt/lyh/DA-FasterCNN/DA-Faster-RCNN/datasets/cityscape/train_t"
+        register_city_pseudo_dataset(
+            json_file=str(pseudo_path),
+            dataset_name=dataset_name,
+            image_root=target_image_root  
+        )
+        target_train_dataset = (dataset_name,)
+        logger.info(f"✓ Using pseudo-labeled dataset: {dataset_name}")
+        break
+else:
+    logger.warning(f"⚠ No pseudo label file found in {pseudo_root}")
+    logger.warning(f"   Expected one of: {[str(p) for p, _ in pseudo_candidates]}")
+    logger.info("   Using unlabeled target domain: city_trainT")
+    logger.info("   → Run generate_pseudo_labels.py first to create pseudo labels!")
+    
 def do_train(cfg_source, cfg_target, model, resume = False):
     
     model.train()
@@ -56,7 +101,11 @@ def do_train(cfg_source, cfg_target, model, resume = False):
     scheduler = build_lr_scheduler(cfg_source, optimizer)
     checkpointer = DetectionCheckpointer(model, cfg_source.OUTPUT_DIR, optimizer=optimizer, scheduler=scheduler)
 
-    start_iter = (checkpointer.resume_or_load(cfg_source.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1)
+    # Only load weights if file exists
+    if cfg_source.MODEL.WEIGHTS and os.path.exists(cfg_source.MODEL.WEIGHTS):
+        start_iter = (checkpointer.resume_or_load(cfg_source.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1)
+    else:
+        start_iter = 0
     max_iter = cfg_source.SOLVER.MAX_ITER
 
     periodic_checkpointer = PeriodicCheckpointer(checkpointer, cfg_source.SOLVER.CHECKPOINT_PERIOD, max_iter=max_iter)
@@ -106,41 +155,40 @@ cfg_source = get_cfg()
 # add_hsfpn_config(cfg_source)
 # cfg_source.MODEL.BACKBONE.NAME = "build_resnet_hsfpn_backbone"
 # cfg_source.MODEL.HSFPN.ENABLED = True
+add_da2od_config(cfg_source)
 cfg_source.merge_from_file(model_zoo.get_config_file("COCO-Detection/faster_rcnn_R_50_FPN_1x.yaml"))
-cfg_source.MODEL.BACKBONE.NAME = "build_resnet_fpn_backbone"
-cfg_source.OUTPUT_DIR = "./output/resnet50_fpn_baseline/"
+# Merge from command line config
+if args.config_file:
+    cfg_source.merge_from_file(args.config_file)
+
+
+# 只需覆盖路径相关的本地设置
+# cfg_source.MODEL.WEIGHTS = "/mnt/lyh/DA-FasterCNN/weights/COCO-Detection/faster_rcnn_R_50_FPN_1x/model_final_b275ba.pkl"
 cfg_source.DATASETS.TRAIN = ("city_trainS",)
-cfg_source.DATALOADER.NUM_WORKERS = 2
-# cfg_source.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-Detection/faster_rcnn_R_50_FPN_1x.yaml")
-cfg_source.MODEL.WEIGHTS = "/mnt/lyh/DA-FasterCNN/weights/COCO-Detection/faster_rcnn_R_50_FPN_1x/model_final_b275ba.pkl"
-cfg_source.SOLVER.IMS_PER_BATCH = 4
-cfg_source.SOLVER.BASE_LR = 0.0005
-cfg_source.SOLVER.WARMUP_FACTOR = 1.0 / 100
-cfg_source.SOLVER.WARMUP_ITERS = 1000
-cfg_source.SOLVER.MAX_ITER = 5000
-cfg_source.INPUT.MIN_SIZE_TRAIN = (600,)
-cfg_source.INPUT.MIN_SIZE_TEST = 0
+cfg_source.OUTPUT_DIR = "./output/da2od_baseline/"
 os.makedirs(cfg_source.OUTPUT_DIR, exist_ok=True)
-cfg_source.MODEL.ROI_HEADS.NUM_CLASSES = 8
-model = build_model(cfg_source)
+
+model = build_da2od(cfg_source)
 
 cfg_target = get_cfg()
 # add_hsfpn_config(cfg_target)
 # cfg_target.MODEL.BACKBONE.NAME = "build_resnet_hsfpn_backbone"
 # cfg_target.MODEL.HSFPN.ENABLED = True
+add_da2od_config(cfg_target)
 cfg_target.merge_from_file(model_zoo.get_config_file("COCO-Detection/faster_rcnn_R_50_FPN_1x.yaml"))
-cfg_target.MODEL.BACKBONE.NAME = "build_resnet_fpn_backbone"
-cfg_target.OUTPUT_DIR = "./output/resnet50_fpn_uda_cityscape_pascalvoc/"
+# Merge from command line config
+if args.config_file:
+    cfg_target.merge_from_file(args.config_file)
+
+cfg_target.OUTPUT_DIR = "./output/da2od_target/"
 cfg_target.DATALOADER.FILTER_EMPTY_ANNOTATIONS = False
-cfg_target.DATASETS.TRAIN = ("city_trainT",)
-cfg_target.INPUT.MIN_SIZE_TRAIN = (600,)
+cfg_target.DATASETS.TRAIN = target_train_dataset
 cfg_target.DATALOADER.NUM_WORKERS = 0
-cfg_target.SOLVER.IMS_PER_BATCH = 4
+os.makedirs(cfg_target.OUTPUT_DIR, exist_ok=True)
+
 
 last_ckpt = os.path.join(cfg_source.OUTPUT_DIR, "last_checkpoint")
 resume_flag = os.path.isfile(last_ckpt)
 if resume_flag:
     logger.info(f"Resuming from {last_ckpt}")
 do_train(cfg_source, cfg_target, model, resume=resume_flag)
-
-

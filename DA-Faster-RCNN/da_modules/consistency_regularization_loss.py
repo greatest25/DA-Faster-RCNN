@@ -6,18 +6,25 @@ def consistency_regularization_loss(
     img_logits: torch.Tensor,               # shape: [B, 1, H, W]
     ins_logits_list: List[torch.Tensor]     # list of B tensors, each of shape [Nᵢ, 1]
 ) -> torch.Tensor:
-    """Compute the consistency regularization loss between image-level and instance-level
-    domain classifier outputs.
+    """
+    计算 image-level 和 instance-level 域分类器输出之间的一致性正则化损失。
     Args:
-        img_logits (Tensor): Logits from the image-level domain classifier,
-                             shape [B, 1, H, W].
-        ins_logits_list (List[Tensor]): List of Tensors from the instance-level
-                                        domain classifier, one per image in the batch.
-                                        Each tensor has shape [Nᵢ, 1], where Nᵢ is the
-                                        number of ROI proposals for image i.
-
+        img_logits (Tensor): 来自图像级域分类器的 logits，
+                             形状为 [B, 1, H, W]。
+        ins_logits_list (List[Tensor]): 来自实例级域分类器的张量列表，
+                                        每个批次中的图像对应一个张量。
+                                        每个张量的形状为 [Nᵢ, 1]，其中 Nᵢ 是
+                                        图像 i 的 ROI 提议数量。
     Returns:
-        Tensor: Scalar tensor representing the mean consistency loss over the batch.
+        Tensor: 标量张量，表示批次中的平均一致性损失。
+    计算公式：
+        对于每个图像 i，计算图像级域概率 p̄_i（通过 sigmoid 后的平均值）和
+        每个实例 j 的实例级域概率 p_{i,j}（通过 sigmoid 后的值）。
+        一致性损失定义为 L2 距离的平均值：  
+        L_i = (1 / Nᵢ) * Σ_j (p̄_i - p_{i,j})²  
+        最终损失为所有图像的平均值：
+        L = (1 / B) * Σ_i L_i
+    其中 B 是批次大小。
     """
     B = img_logits.size(0)
     total_loss = 0.0

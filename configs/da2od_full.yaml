@@ -1,0 +1,42 @@
+# DA2OD Complete Training - Cityscapes clear→foggy
+
+_BASE_: "/mnt/lyh/DA-FasterCNN/detectron2-main/configs/Base-RCNN-FPN.yaml"
+
+MODEL:
+  WEIGHTS: "/mnt/lyh/DA-FasterCNN/weights/COCO-Detection/faster_rcnn_R_50_FPN_1x/model_final_b275ba.pkl"
+  ROI_HEADS:
+    NUM_CLASSES: 8
+    BATCH_SIZE_PER_IMAGE: 512
+
+SOLVER:
+  MAX_ITER: 5000
+  CHECKPOINT_PERIOD: 1000
+  BASE_LR: 0.001
+  IMS_PER_BATCH: 2
+  STEPS: (3000, 4500)
+  GAMMA: 0.1
+  WARMUP_ITERS: 500
+
+DATASETS:
+  TRAIN: ("city_trainS",)  # Source domain labeled data
+  UNLABELED: ("city_trainT_pseudo_thr07",)  # Target domain with pseudo labels
+  TEST: ("city_testT",)
+  BATCH_COMPONENTS: ["labeled_weak", "unlabeled_weak"]
+  BATCH_RATIOS: [1, 1]  # 1:1 ratio
+
+OUTPUT_DIR: "./output_da2od_full"
+
+DA:
+  ALIGN:
+    IMG_DA_ENABLED: True
+    IMG_DA_INPUT_DIM: 256
+    IMG_DA_LAYER: "p2"
+    IMG_DA_WEIGHT: 0.1
+
+EMA:
+  ENABLED: True
+  ALPHA: 0.999
+  LOAD_FROM_EMA_ON_START: False
+
+TEST:
+  EVAL_PERIOD: 1000

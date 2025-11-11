@@ -29,35 +29,32 @@ The call should return a `nn.Module` object.
 
 
 """
-Shape shorthand in this module:
+模型输入/输出张量维度约定:
 
-    N: number of images in the minibatch
-    L: number of feature maps per image on which RPN is run
-    A: number of cell anchors (must be the same for all feature maps)
-    Hi, Wi: height and width of the i-th feature map
-    B: size of the box parameterization
+    N: minibatch中的图像数量
+    L:运行RPN的每个图像的特征图数量
+    A:单元锚点的数量（所有特征图必须相同）
+    Hi, Wi:第i个特征图的高度和宽度
+    B:盒子参数化的大小
+    box_dim:盒子的维度（4或5）
 
-Naming convention:
-
-    objectness: refers to the binary classification of an anchor as object vs. not object.
-
-    deltas: refers to the 4-d (dx, dy, dw, dh) deltas that parameterize the box2box
-    transform (see :class:`box_regression.Box2BoxTransform`), or 5d for rotated boxes.
-
-    pred_objectness_logits: predicted objectness scores in [-inf, +inf]; use
-        sigmoid(pred_objectness_logits) to estimate P(object).
-
-    gt_labels: ground-truth binary classification labels for objectness
-
-    pred_anchor_deltas: predicted box2box transform deltas
-
-    gt_anchor_deltas: ground-truth box2box transform deltas
+命名约定：
+    objectness:指锚点作为对象与非对象的二进制分类。
+    deltas:指参数化box2box变换的4d（dx，dy，dw，dh）增量，或旋转框的5d。
+    pred_objectness_logits:预测的对象性分数在[-inf，+inf]中;使用
+        sigmoid（pred_objectness_logits）来估计P（对象）。
+    gt_labels:对象性的地面真实二进制分类标签
+    pred_anchor_deltas:预测的box2box变换增量
+    gt_anchor_deltas:真实box2box变换增量
 """
 
+# RPN主要作用是为后续的ROI头生成高质量的区域建议。
+# RPN头负责从特征图中预测每个锚点的对象性分数和边界框回归增量。
+# RPN头的实现可以通过注册不同的类来扩展，这些类可以通过配置进行选择。
 
 def build_rpn_head(cfg, input_shape):
     """
-    Build an RPN head defined by `cfg.MODEL.RPN.HEAD_NAME`.
+    通过配置构建RPN头。
     """
     name = cfg.MODEL.RPN.HEAD_NAME
     return RPN_HEAD_REGISTRY.get(name)(cfg, input_shape)
@@ -66,10 +63,10 @@ def build_rpn_head(cfg, input_shape):
 @RPN_HEAD_REGISTRY.register()
 class StandardRPNHead(nn.Module):
     """
-    Standard RPN classification and regression heads described in :paper:`Faster R-CNN`.
-    Uses a 3x3 conv to produce a shared hidden state from which one 1x1 conv predicts
-    objectness logits for each anchor and a second 1x1 conv predicts bounding-box deltas
-    specifying how to deform each anchor into an object proposal.
+    标准RPN分类和回归头，如:paper:`Faster R-CNN`中所述。
+    使用3x3 conv生成共享隐藏状态，从中一个1x1 conv预测每个锚点的对象性logits，
+    第二个1x1 conv预测边界框增量，指定如何将每个锚点变形为对象建议。
+    该实现支持多个3x3 conv层以生成隐藏表示。
     """
 
     @configurable
@@ -79,23 +76,18 @@ class StandardRPNHead(nn.Module):
         """
         NOTE: this interface is experimental.
 
-        Args:
-            in_channels (int): number of input feature channels. When using multiple
-                input features, they must have the same number of channels.
-            num_anchors (int): number of anchors to predict for *each spatial position*
-                on the feature map. The total number of anchors for each
-                feature map will be `num_anchors * H * W`.
-            box_dim (int): dimension of a box, which is also the number of box regression
-                predictions to make for each anchor. An axis aligned box has
-                box_dim=4, while a rotated box has box_dim=5.
-            conv_dims (list[int]): a list of integers representing the output channels
-                of N conv layers. Set it to -1 to use the same number of output channels
-                as input channels.
+        参数说明：
+            in_channels (int): 输入特征通道的数量。当使用多个输入特征时，它们必须具有相同的通道数。
+            num_anchors (int): 每个空间位置上要预测的锚点数量。
+                每个特征图的总锚点数将为`num_anchors * H * W`。
+            box_dim (int): 盒子的维度，这也是每个锚点要进行的边界框回归预测的数量。
+                轴对齐盒子的box_dim=4，而旋转盒子的box_dim=5。
+            conv_dims (list[int]): 一个整数列表，表示N个conv层的输出通道数。
+                将其设置为-1以使用与输入通道相同的输出通道数。
         """
         super().__init__()
         cur_channels = in_channels
-        # Keeping the old variable names and structure for backwards compatiblity.
-        # Otherwise the old checkpoints will fail to load.
+        # 使旧的变量名和结构保持向后兼容性。否则旧的检查点将无法加载。
         if len(conv_dims) == 1:
             out_channels = cur_channels if conv_dims[0] == -1 else conv_dims[0]
             # 3x3 conv for the hidden representation
@@ -135,13 +127,13 @@ class StandardRPNHead(nn.Module):
 
     @classmethod
     def from_config(cls, cfg, input_shape):
-        # Standard RPN is shared across levels:
+        # 标准RPN头假设所有输入特征具有相同的通道数。
         in_channels = [s.channels for s in input_shape]
         assert len(set(in_channels)) == 1, "Each level must have the same channel!"
         in_channels = in_channels[0]
 
-        # RPNHead should take the same input as anchor generator
-        # NOTE: it assumes that creating an anchor generator does not have unwanted side effect.
+        # RPNHead需要知道每个空间位置的锚点数量和盒子维度。
+        # NOTE: 这里假设所有输入特征具有相同的锚点数量和盒子维度。
         anchor_generator = build_anchor_generator(cfg, input_shape)
         num_anchors = anchor_generator.num_anchors
         box_dim = anchor_generator.box_dim
@@ -157,16 +149,15 @@ class StandardRPNHead(nn.Module):
 
     def forward(self, features: List[torch.Tensor]):
         """
-        Args:
-            features (list[Tensor]): list of feature maps
-
-        Returns:
-            list[Tensor]: A list of L elements.
-                Element i is a tensor of shape (N, A, Hi, Wi) representing
-                the predicted objectness logits for all anchors. A is the number of cell anchors.
-            list[Tensor]: A list of L elements. Element i is a tensor of shape
-                (N, A*box_dim, Hi, Wi) representing the predicted "deltas" used to transform anchors
-                to proposals.
+        参数说明：
+            features (list[Tensor]): 特征图列表
+        返回值：
+            list[Tensor]: 包含L个元素的列表。
+                元素i是形状为(N, A, Hi, Wi)的张量，表示
+                所有锚点的预测对象性logits。A是单元锚点的数量。
+            list[Tensor]: 包含L个元素的列表。元素i是形状为
+                (N, A*box_dim, Hi, Wi)的张量，表示用于将锚点
+                转换为建议的预测“增量”。
         """
         pred_objectness_logits = []
         pred_anchor_deltas = []
@@ -206,34 +197,28 @@ class RPN(nn.Module):
         """
         NOTE: this interface is experimental.
 
-        Args:
-            in_features (list[str]): list of names of input features to use
-            head (nn.Module): a module that predicts logits and regression deltas
-                for each level from a list of per-level features
-            anchor_generator (nn.Module): a module that creates anchors from a
-                list of features. Usually an instance of :class:`AnchorGenerator`
-            anchor_matcher (Matcher): label the anchors by matching them with ground truth.
-            box2box_transform (Box2BoxTransform): defines the transform from anchors boxes to
-                instance boxes
-            batch_size_per_image (int): number of anchors per image to sample for training
-            positive_fraction (float): fraction of foreground anchors to sample for training
-            pre_nms_topk (tuple[float]): (train, test) that represents the
-                number of top k proposals to select before NMS, in
-                training and testing.
-            post_nms_topk (tuple[float]): (train, test) that represents the
-                number of top k proposals to select after NMS, in
-                training and testing.
-            nms_thresh (float): NMS threshold used to de-duplicate the predicted proposals
-            min_box_size (float): remove proposal boxes with any side smaller than this threshold,
-                in the unit of input image pixels
-            anchor_boundary_thresh (float): legacy option
-            loss_weight (float|dict): weights to use for losses. Can be single float for weighting
-                all rpn losses together, or a dict of individual weightings. Valid dict keys are:
-                    "loss_rpn_cls" - applied to classification loss
-                    "loss_rpn_loc" - applied to box regression loss
-            box_reg_loss_type (str): Loss type to use. Supported losses: "smooth_l1", "giou".
-            smooth_l1_beta (float): beta parameter for the smooth L1 regression loss. Default to
-                use L1 loss. Only used when `box_reg_loss_type` is "smooth_l1"
+        参数说明：
+            in_features (list[str]): 要使用的输入特征名称列表
+            head (nn.Module): 一个模块，从每个级别的每级特征中预测logits和回归增量的列表
+            anchor_generator (nn.Module): 一个从特征列表创建锚点的模块。通常是:class:`AnchorGenerator`的实例
+            anchor_matcher (Matcher): 通过将锚点与地面真实值匹配来标记锚点。
+            box2box_transform (Box2BoxTransform): 定义从锚点盒到实例盒的变换
+            batch_size_per_image (int): 每个图像用于训练的锚点数量
+            positive_fraction (float): 用于训练的前景锚点的比例
+            pre_nms_topk (tuple[float]): (train, test)表示在NMS之前选择的前k个建议的数量，训练和测试中。
+            post_nms_topk (tuple[float]): (train, test)表示
+                在NMS之后选择的前k个建议的数量，训练和测试中。
+            nms_thresh (float): 用于去重预测建议的NMS阈值
+            min_box_size (float): 删除任何边小于此阈值的建议框，
+                以输入图像像素为单位
+            anchor_boundary_thresh (float): 传统选项
+            loss_weight (float|dict): 用于损失的权重。可以是用于加权
+                所有rpn损失的单个浮点数，或单个权重的字典。有效的字典键是：
+                    "loss_rpn_cls" - 应用于分类损失
+                    "loss_rpn_loc" - 应用于盒回归损失
+            box_reg_loss_type (str): 使用的损失类型。支持的损失："smooth_l1"、"giou"。
+            smooth_l1_beta (float): 平滑L1回归损失的beta参数。默认为
+                使用L1损失。仅当`box_reg_loss_type`为"smooth_l1"时使用        
         """
         super().__init__()
         self.in_features = in_features
@@ -286,17 +271,14 @@ class RPN(nn.Module):
 
     def _subsample_labels(self, label):
         """
-        Randomly sample a subset of positive and negative examples, and overwrite
-        the label vector to the ignore value (-1) for all elements that are not
-        included in the sample.
-
-        Args:
-            labels (Tensor): a vector of -1, 0, 1. Will be modified in-place and returned.
+        随机采样正负样本子集，并将标签向量中未包含在样本中的所有元素覆盖为忽略值（-1）。
+        参数说明：
+            label (Tensor): 一个-1、0、1的向量。将被就地修改并返回。
         """
         pos_idx, neg_idx = subsample_labels(
             label, self.batch_size_per_image, self.positive_fraction, 0
         )
-        # Fill with the ignore label (-1), then set positive and negative labels
+        # 填充所有标签为-1，然后将采样的正负索引设置为1和0
         label.fill_(-1)
         label.scatter_(0, pos_idx, 1)
         label.scatter_(0, neg_idx, 0)
@@ -308,19 +290,18 @@ class RPN(nn.Module):
         self, anchors: List[Boxes], gt_instances: List[Instances]
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
-        Args:
-            anchors (list[Boxes]): anchors for each feature map.
-            gt_instances: the ground-truth instances for each image.
-
-        Returns:
+        参数说明：
+            anchors (list[Boxes]): 每个特征图的锚点。
+            gt_instances: 每个图像的真实实例。
+        返回值：
             list[Tensor]:
-                List of #img tensors. i-th element is a vector of labels whose length is
-                the total number of anchors across all feature maps R = sum(Hi * Wi * A).
-                Label values are in {-1, 0, 1}, with meanings: -1 = ignore; 0 = negative
-                class; 1 = positive class.
+                包含#img张量的列表。第i个元素是一个标签向量，其长度为
+                所有特征图R = sum(Hi * Wi * A)的锚点总数。
+                标签值在{-1，0，1}中，含义为：-1 = 忽略; 0 = 负类;
+                1 = 正类。
             list[Tensor]:
-                i-th element is a Rx4 tensor. The values are the matched gt boxes for each
-                anchor. Values are undefined for those anchors not labeled as 1.
+                第i个元素是一个Rx4张量。值是每个锚点匹配的gt盒子。
+                对于未标记为1的锚点，值未定义。
         """
         anchors = Boxes.cat(anchors)
 
@@ -336,27 +317,29 @@ class RPN(nn.Module):
             gt_boxes_i: ground-truth boxes for i-th image
             """
 
-            match_quality_matrix = retry_if_cuda_oom(pairwise_iou)(gt_boxes_i, anchors)
+            # 计算锚点和真实盒子之间的匹配质量矩阵
+            match_quality_matrix = retry_if_cuda_oom(pairwise_iou)(gt_boxes_i, anchors) 
             matched_idxs, gt_labels_i = retry_if_cuda_oom(self.anchor_matcher)(match_quality_matrix)
-            # Matching is memory-expensive and may result in CPU tensors. But the result is small
+            # 匹配的索引：对于每个锚点，返回匹配的gt盒子的索引
+            # gt_labels_i：对于每个锚点，返回匹配的gt盒子的标签（1=正类，0=负类，-1=忽略）
             gt_labels_i = gt_labels_i.to(device=gt_boxes_i.device)
             del match_quality_matrix
 
             if self.anchor_boundary_thresh >= 0:
-                # Discard anchors that go out of the boundaries of the image
+                # 通过仅考虑完全在图像内的锚点来过滤锚点
                 # NOTE: This is legacy functionality that is turned off by default in Detectron2
                 anchors_inside_image = anchors.inside_box(image_size_i, self.anchor_boundary_thresh)
                 gt_labels_i[~anchors_inside_image] = -1
 
             # A vector of labels (-1, 0, 1) for each anchor
-            gt_labels_i = self._subsample_labels(gt_labels_i)
+            gt_labels_i = self._subsample_labels(gt_labels_i)   # 对标签进行采样
 
             if len(gt_boxes_i) == 0:
                 # These values won't be used anyway since the anchor is labeled as background
-                matched_gt_boxes_i = torch.zeros_like(anchors.tensor)
+                matched_gt_boxes_i = torch.zeros_like(anchors.tensor)  # 如果没有gt盒子，则创建一个全零张量
             else:
                 # TODO wasted indexing computation for ignored boxes
-                matched_gt_boxes_i = gt_boxes_i[matched_idxs].tensor
+                matched_gt_boxes_i = gt_boxes_i[matched_idxs].tensor    # 获取每个锚点匹配的gt盒子
 
             gt_labels.append(gt_labels_i)  # N,AHW
             matched_gt_boxes.append(matched_gt_boxes_i)
@@ -372,36 +355,34 @@ class RPN(nn.Module):
         gt_boxes: List[torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         """
-        Return the losses from a set of RPN predictions and their associated ground-truth.
+        返回RPN以及与其相关的损失。
 
-        Args:
-            anchors (list[Boxes or RotatedBoxes]): anchors for each feature map, each
-                has shape (Hi*Wi*A, B), where B is box dimension (4 or 5).
-            pred_objectness_logits (list[Tensor]): A list of L elements.
-                Element i is a tensor of shape (N, Hi*Wi*A) representing
-                the predicted objectness logits for all anchors.
-            gt_labels (list[Tensor]): Output of :meth:`label_and_sample_anchors`.
-            pred_anchor_deltas (list[Tensor]): A list of L elements. Element i is a tensor of shape
-                (N, Hi*Wi*A, 4 or 5) representing the predicted "deltas" used to transform anchors
-                to proposals.
-            gt_boxes (list[Tensor]): Output of :meth:`label_and_sample_anchors`.
+        参数说明：
+            achors (list[Boxes]): 每个特征图的锚点，每个锚点形状为(Hi*Wi*A, B)，其中B是盒子维度（4或5）。
+            pred_objectness_logits (list[Tensor]): 包含L个元素的列表。
+                元素i是形状为(N, Hi*Wi*A)的张量，表示
+                所有锚点的预测对象性logits。
+            gt_labels (list[Tensor]): :meth:`label_and_sample_anchors`的输出。
+            pred_anchor_deltas (list[Tensor]): 包含L个元素的列表。元素i是形状为
+                (N, Hi*Wi*A, 4或5)的张量，表示用于将锚点转换为建议的预测“增量”。
+            gt_boxes (list[Tensor]): :meth:`label_and_sample_anchors`的输出。
 
-        Returns:
-            dict[loss name -> loss value]: A dict mapping from loss name to loss value.
-                Loss names are: `loss_rpn_cls` for objectness classification and
-                `loss_rpn_loc` for proposal localization.
+        返回值：
+            dict[loss name -> loss value]: 一个字典，将损失名称映射到损失值。
+                损失名称为：`loss_rpn_cls`表示对象性分类，`loss_rpn_loc`表示建议定位。
         """
         num_images = len(gt_labels)
         gt_labels = torch.stack(gt_labels)  # (N, sum(Hi*Wi*Ai))
 
-        # Log the number of positive/negative anchors per-image that's used in training
-        pos_mask = gt_labels == 1
-        num_pos_anchors = pos_mask.sum().item()
+        # 记录用于训练的正负锚点数量
+        pos_mask = gt_labels == 1   # 正样本掩码，用于筛选正样本
+        num_pos_anchors = pos_mask.sum().item() # 统计正样本数量
         num_neg_anchors = (gt_labels == 0).sum().item()
         storage = get_event_storage()
         storage.put_scalar("rpn/num_pos_anchors", num_pos_anchors / num_images)
         storage.put_scalar("rpn/num_neg_anchors", num_neg_anchors / num_images)
 
+        # 计算定位损失和对象性分类损失
         localization_loss = _dense_box_regression_loss(
             anchors,
             self.box2box_transform,
@@ -412,20 +393,19 @@ class RPN(nn.Module):
             smooth_l1_beta=self.smooth_l1_beta,
         )
 
-        valid_mask = gt_labels >= 0
+        valid_mask = gt_labels >= 0 # 仅考虑未忽略的锚点
         objectness_loss = F.binary_cross_entropy_with_logits(
             cat(pred_objectness_logits, dim=1)[valid_mask],
             gt_labels[valid_mask].to(torch.float32),
             reduction="sum",
         )
-        normalizer = self.batch_size_per_image * num_images
+        normalizer = self.batch_size_per_image * num_images # 标准化因子，用于归一化损失
         losses = {
             "loss_rpn_cls": objectness_loss / normalizer,
-            # The original Faster R-CNN paper uses a slightly different normalizer
-            # for loc loss. But it doesn't matter in practice
+            # 原始论文使用的标准化因子略微不同，但效果相似
             "loss_rpn_loc": localization_loss / normalizer,
         }
-        losses = {k: v * self.loss_weight.get(k, 1.0) for k, v in losses.items()}
+        losses = {k: v * self.loss_weight.get(k, 1.0) for k, v in losses.items()}# 应用损失权重
         return losses
 
     def forward(
@@ -436,23 +416,22 @@ class RPN(nn.Module):
         target_domain = False
     ):
         """
-        Args:
-            images (ImageList): input images of length `N`
-            features (dict[str, Tensor]): input data as a mapping from feature
-                map name to tensor. Axis 0 represents the number of images `N` in
-                the input data; axes 1-3 are channels, height, and width, which may
-                vary between feature maps (e.g., if a feature pyramid is used).
-            gt_instances (list[Instances], optional): a length `N` list of `Instances`s.
-                Each `Instances` stores ground-truth instances for the corresponding image.
-
-        Returns:
-            proposals: list[Instances]: contains fields "proposal_boxes", "objectness_logits"
-            loss: dict[Tensor] or None
+        参数说明：
+            images (ImageList): 长度为`N`的输入图像
+            features (dict[str, Tensor]): 输入数据作为从特征图名称到张量的映射。
+                轴0表示输入数据中的图像数量`N`;轴1-3是通道、高度和宽度，
+                特征图之间可能有所不同（例如，如果使用特征金字塔）。    
+            gt_instances (list[Instances], optional): 长度为`N`的`Instances`列表。
+                每个`Instances`存储对应图像的地面真实实例。
+        返回值：
+            proposals: list[Instances]: 包含字段“proposal_boxes”、“objectness_logits”
+            loss: dict[Tensor] or None: RPN损失。如果在训练模式下返回，否则为None。
         """
-        features = [features[f] for f in self.in_features]
+        features = [features[f] for f in self.in_features]  # 提取所需的输入特征
+         # 为每个特征图生成锚点
         anchors = self.anchor_generator(features)
 
-        pred_objectness_logits, pred_anchor_deltas = self.rpn_head(features)
+        pred_objectness_logits, pred_anchor_deltas = self.rpn_head(features)    # 通过RPN头获取预测
         # Transpose the Hi*Wi*A dimension to the middle:
         pred_objectness_logits = [
             # (N, A, Hi, Wi) -> (N, Hi, Wi, A) -> (N, Hi*Wi*A)
@@ -493,13 +472,20 @@ class RPN(nn.Module):
         image_sizes: List[Tuple[int, int]],
     ):
         """
-        Decode all the predicted box regression deltas to proposals. Find the top proposals
-        by applying NMS and removing boxes that are too small.
+        通过解码所有预测的盒子回归增量为建议来生成建议。再通过应用NMS并删除过小的盒子来找到顶级建议框。
 
-        Returns:
-            proposals (list[Instances]): list of N Instances. The i-th Instances
-                stores post_nms_topk object proposals for image i, sorted by their
-                objectness score in descending order.
+        参数说明：
+            anchors (list[Boxes]): 每个特征图的锚点。
+            pred_objectness_logits (list[Tensor]): 包含L个元素的列表。
+                元素i是形状为(N, Hi*Wi*A)的张量，表示
+                所有锚点的预测对象性logits。
+            pred_anchor_deltas (list[Tensor]): 包含L个元素的列表。元素i是形状为
+                (N, Hi*Wi*A, 4或5)的张量，表示用于将锚点转换为建议的预测“增量”。
+            image_sizes (list[tuple]): 每个图像的（高度，宽度）。
+
+        返回值：    
+            proposals (list[Instances]): N个Instances的列表。第i个Instances
+                存储图像i的post_nms_topk对象建议，这些建议按其对象性分数降序排序。
         """
         # The proposals are treated as fixed for joint training with roi heads.
         # This approach ignores the derivative w.r.t. the proposal boxes’ coordinates that
@@ -519,17 +505,21 @@ class RPN(nn.Module):
 
     def _decode_proposals(self, anchors: List[Boxes], pred_anchor_deltas: List[torch.Tensor]):
         """
-        Transform anchors into proposals by applying the predicted anchor deltas.
+        将锚点通过应用预测的锚点增量转换为建议。
 
-        Returns:
-            proposals (list[Tensor]): A list of L tensors. Tensor i has shape
-                (N, Hi*Wi*A, B)
+        参数说明：
+            anchors (list[Boxes]): 每个特征图的锚点。
+            pred_anchor_deltas (list[Tensor]): 包含L个元素的列表。元素i是形状为
+                (N, Hi*Wi*A, 4或5)的张量，表示用于将锚点转换为建议的预测“增量”。
+        返回值：
+            proposals (list[Tensor]): 包含L个元素的列表。元素i是形状为
+                (N, Hi*Wi*A, B)的张量，表示预测的建议盒子。
         """
         N = pred_anchor_deltas[0].shape[0]
         proposals = []
         # For each feature map
         for anchors_i, pred_anchor_deltas_i in zip(anchors, pred_anchor_deltas):
-            B = anchors_i.tensor.size(1)
+            B = anchors_i.tensor.size(1) 
             pred_anchor_deltas_i = pred_anchor_deltas_i.reshape(-1, B)
             # Expand anchors to shape (N*Hi*Wi*A, B)
             anchors_i = anchors_i.tensor.unsqueeze(0).expand(N, -1, -1).reshape(-1, B)
